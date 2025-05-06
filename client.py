@@ -30,13 +30,14 @@ class Client(CursesConsoleApp):
         super().__init__(username=username)
         self.username = username
         self.server_addr = server_addr
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        
         self.aes_key = None
         self.hmac_key = None
         self.cached_msg = None
         self.seq = 0
-        
         self.private_key, self.public_key = generate_rsa_keypair() 
+        
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.initialize()
         threading.Thread(target=self.receive_messages, daemon=True).start()
         self.run_client()

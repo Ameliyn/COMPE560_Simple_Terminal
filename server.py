@@ -10,6 +10,7 @@ from curses import wrapper
 
 from crypto_utils import generate_aes_key, encrypt_with_rsa, decrypt_with_aes, encrypt_with_aes
 from curses_console_app import CursesConsoleApp
+from russ_chat_message_handler import RussChatMessageHandler
 
 #SERVER_IP: ‘0.0.0.0’ means the server listens on all available network interfaces.
 #SERVER_PORT: The port number used for communication.
@@ -19,14 +20,15 @@ SERVER_PORT = 12347
 BUFFER_SIZE = 4096    
 
 
-class Server(CursesConsoleApp):
+class Server(CursesConsoleApp, RussChatMessageHandler):
     def __init__(self, server_addr):
         '''Initialize the Server.
         
         Params: 
             server_addr: tuple Server IP and port to bind to.
         '''
-        super().__init__('Server')
+        RussChatMessageHandler.__init__(self)
+        CursesConsoleApp.__init__(self, username='Server')
         self.server_addr = server_addr
         self.clients = {}
         self.client_keys = {}
