@@ -1,21 +1,11 @@
-#socket: Provides the low-level networking interface.
-#threading: Allows the server and client to handle sending and receiving messages concurrently.
 import socket
 import threading
 import time
-import base64 
-from cryptography.hazmat.primitives import hashes, hmac
-from Crypto.Util.Padding import pad
-from crypto_utils import ( 
-generate_rsa_keypair, decrypt_with_rsa, 
-encrypt_with_aes, decrypt_with_aes 
-) 
-import json
 
 import curses
 from curses import wrapper
-from curses.textpad import Textbox, rectangle
 from curses_console_app import CursesConsoleApp
+from russ_chat_message_handler import RussChatMessageHandler
 
 #SERVER_IP: ‘0.0.0.0’ means the server listens on all available network interfaces.
 #SERVER_PORT: The port number used for communication.
@@ -24,31 +14,29 @@ SERVER_IP = 'localhost'  # Bind to all interfaces
 SERVER_PORT = 12347
 BUFFER_SIZE = 4096
 
-class Client(CursesConsoleApp):
+class Client(CursesConsoleApp, RussChatMessageHandler):
 
     def __init__(self, username, server_addr):
-        super().__init__(username=username)
+        RussChatMessageHandler.__init__(self)
+        CursesConsoleApp.__init__(self, username=username)
         self.username = username
         self.server_addr = server_addr
-        
-        self.aes_key = None
-        self.hmac_key = None
-        self.cached_msg = None
-        self.seq = 0
-        self.private_key, self.public_key = generate_rsa_keypair() 
-        
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.initialize()
         threading.Thread(target=self.receive_messages, daemon=True).start()
         self.run_client()
-    
+
     def initialize(self):
+        '''Initialize Client.'''
         self.write_console('Establishing Secure Server Connection...')
         thread_started = False
         timeout = 0
-        while self.aes_key is None or self.hmac_key is None: 
+        self.create_connection(self.server_addr, 0)
+        conreq = self.create_con_req_message(self.server_addr)
+        self.sock.sendto(conreq, self.server_addr)
+
+        while self.connections[self.server_addr].aes_key is None or self.connections[self.server_addr].hmac_secret is None:
             self.write_console('Waiting for server Connection...')
-            self.sock.sendto(base64.b64encode(self.public_key), self.server_addr)
             if not thread_started:
                 threading.Thread(target=self.wait_for_initial_response, daemon=True).start()
                 thread_started = True
@@ -58,85 +46,93 @@ class Client(CursesConsoleApp):
                 self.write_console('ERROR: Connection could not be established. Quitting in 5 seconds...')
                 time.sleep(5)
                 raise RuntimeError('Connection Could Not be Established with Server')
-            
+
         self.write_console('Done!')
-    
+
     def wait_for_initial_response(self):
-        data, _ = self.sock.recvfrom(4096)
-        self.aes_key = decrypt_with_rsa(self.private_key, data)
-        self.write_console("Received and decrypted AES key.") 
-        data, _ = self.sock.recvfrom(4096)
-        self.hmac_key = bytes.fromhex(decrypt_with_aes(self.aes_key, data))
-        self.write_console(f'Received HMAC key')          
+        '''Wait for initial response asynchronously.'''
+        while True:
+            data, addr = self.sock.recvfrom(4096)
+            msg = self._decode_message(data=data, addr=addr)
+            if msg['msg_type'] != 1:
+                time.sleep(1)
+                continue
+            else:
+                self.handle_con_ack_message(message_dict=msg, addr=addr)
+                self.server_addr = addr
+                self.write_console("Received and decrypted AES key.")
+                self.write_console(f'Received HMAC key')
+                break
 
     # Function to receive messages concurrently
     def receive_messages(self):
-        while True: 
-            data, _ = self.sock.recvfrom(4096) 
-            if self.aes_key is None: 
-                encrypted_key = base64.b64decode(data) 
-                self.aes_key = decrypt_with_rsa(self.private_key, encrypted_key) 
-                self.write_console("Received and decrypted AES key.") 
-            elif self.hmac_key is None:
-                self.hmac_key = bytes.fromhex(decrypt_with_aes(self.aes_key, data))
-                self.write_console(f'Received HMAC key')
-            else:
+        '''Receive and process messages.'''
+        while True:
+            data, addr = self.sock.recvfrom(4096)
+            if addr in self.connections.keys():
                 try:
-                    msg = json.loads(decrypt_with_aes(self.aes_key, data))
-                    if msg['msg_type'] == 'msg':
-                        h = hmac.HMAC(self.hmac_key, hashes.SHA256())
-                        h.update(msg['msg'].encode())
-                        if h.finalize() == bytes.fromhex(msg['hmac']):
-                            self.write_console(f'[HMAC Verified] {msg["msg"]}')
-                        
-                        # Send ACK
-                        ack = {}
-                        ack['msg_type'] = 'ack'
-                        ack['seq'] = msg['seq'] + len(msg['msg'])
-                        encrypted = encrypt_with_aes(self.aes_key, json.dumps(ack)).encode()
-                        self.sock.sendto(encrypted, self.server_addr)
-                    elif msg['msg_type'] == 'ack':
-                        self.seq = msg['seq']
+                    msg = self._decode_message(addr=addr, data=data)
+                    if msg['msg_type'] == 0:
+                        # Handle CONREQ Message
+                        self.write_console(f'WARNING Received CONREQ as client: [{addr}]')
+                    elif msg['msg_type'] == 1:
+                        # Handle CONACK Message
+                        self.write_console(f'Received new CONACK message... Reinitializing connection.')
+                        self.initialize()
+                    elif msg['msg_type'] == 2:
+                        # Handle Data Message
+                        # Check Validity
+                        validity = self.check_hmac_validation(addr=addr, payload=msg['payload'],received_hmac=msg['hmac'])
+                        if validity:
+                            self.write_console(f'[HMAC Verified] [{addr}] {msg["payload"].decode()}')
+                        else:
+                            self.write_console(f'[HMAC FAILED] [{addr}] {msg["payload"].decode()}')
+
+                        # Send Acknowledgement
+                        ack_msg = self.create_ack_message(addr, msg['payload'])
+                        self.sock.sendto(ack_msg, addr)
+
+                    elif msg['msg_type'] == 3:
+                        self.write_console(f'Ack Received for seq: {msg["seq"]}')
+                        self.connections[addr].rx_seq = msg['seq']
+                        # Handle Acknowledgement Message
+                    else:
+                        raise RuntimeError('Server received message for unsopported type.')
                 except Exception as e:
                     self.write_console('Decryption Failed!')
                     self.write_console(e)
-    
-    # Client chat function
-    #Creates a UDP socket for the client to communicate with the server.
+            else:
+                self.write_console(f'WARNING: Received message from non-server entity.')
+
     def run_client(self):
-        # Start the receiving thread
-        # Sending messages from the main thread
+        '''Get input and broadcast messages.'''
         while True:
             try:
                 message = self.get_input().strip()
-                if self.aes_key:
-                    h = hmac.HMAC(self.hmac_key, hashes.SHA256())
-                    h.update(f'{self.username}: {message}'.encode())
-                    finalize = h.finalize()
+                if self.server_addr in self.connections.keys():
+                    data_message = self.create_data_message(addr=self.server_addr, payload=f'{self.username}: {message}'.encode())
 
-                    deliverable = {}
-                    deliverable['msg'] = f'{self.username}: {message}'
-                    deliverable['hmac'] = finalize.hex()
-                    deliverable['seq'] = self.seq
-                    deliverable['msg_type'] = 'msg'
+                    desired_seq = self.connections[self.server_addr].rx_seq + len(f'{self.username}: {message}'.encode())
+                    self.write_console(f'Current Seq: {self.connections[self.server_addr].rx_seq}')
+                    self.write_console(f'Desired Seq: {desired_seq}')
 
-                    encrypted = encrypt_with_aes(self.aes_key, json.dumps(deliverable)).encode()
-                    desired_seq = self.seq + len(f'{self.username}: {message}')
-                    retries = 0
-                    while self.seq != desired_seq:
-                        self.sock.sendto(encrypted, self.server_addr)
+                    retries = 3
+                    retry_count = 0
+                    while self.connections[self.server_addr].rx_seq != desired_seq:
+                        self.sock.sendto(data_message, self.server_addr)
                         time.sleep(0.3)
-                        retries += 1
-                        if retries >= 3:
+                        retry_count += 1
+                        if retry_count >= retries:
                             self.write_console(f'NO ACK RECEIVED FROM {self.server_addr}')
                             break
-                    if self.seq == desired_seq:
+                    if self.connections[self.server_addr].rx_seq == desired_seq:
                         self.write_console(msg=f'[You] {self.username}: {message}')
             except Exception as e:
                 self.write_console(f"Error sending message: {e}")
 
 
 def main(stdscr):
+    # Get username
     inp = curses.newwin(8,55, 0,0)
     inp.addstr(1,1, "Please enter your username:")
     sub = inp.subwin(3, 34, 2, 1)
@@ -145,11 +141,14 @@ def main(stdscr):
     tb = curses.textpad.Textbox(sub2)
     inp.refresh()
     tb.edit()
-    # Get resulting contents
     username = tb.gather()
+
+    # Reset Window
     del inp
     stdscr.touchwin()
     stdscr.refresh()
+
+    # Start Client
     c = Client(username.strip().replace('\n',''), (SERVER_IP,SERVER_PORT))
 
 
@@ -159,4 +158,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt as k:
         print('Goodbye!')
     except Exception as e:
+        print('Fatal Exception')
         print(e)
+        # raise e

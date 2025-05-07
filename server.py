@@ -1,14 +1,10 @@
 '''Create a server for encrypted conmmunication.'''
-import base64
-import json
-import socket 
-import threading 
+import socket
+import threading
 import time
 
-from cryptography.hazmat.primitives import hashes, hmac
 from curses import wrapper
 
-from crypto_utils import generate_aes_key, encrypt_with_rsa, decrypt_with_aes, encrypt_with_aes
 from curses_console_app import CursesConsoleApp
 from russ_chat_message_handler import RussChatMessageHandler
 
@@ -17,118 +13,100 @@ from russ_chat_message_handler import RussChatMessageHandler
 #BUFFER_SIZE: The size of the data chunks received (4 KB).
 SERVER_IP = 'localhost'  # Bind to all interfaces
 SERVER_PORT = 12347
-BUFFER_SIZE = 4096    
+BUFFER_SIZE = 4096
 
 
 class Server(CursesConsoleApp, RussChatMessageHandler):
     def __init__(self, server_addr):
         '''Initialize the Server.
-        
-        Params: 
+
+        Params:
             server_addr: tuple Server IP and port to bind to.
         '''
         RussChatMessageHandler.__init__(self)
         CursesConsoleApp.__init__(self, username='Server')
         self.server_addr = server_addr
-        self.clients = {}
-        self.client_keys = {}
-        self.client_hmac_keys = {}
-        self.hmac = {}
-        self.seq = {}
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) 
-        self.sock.bind(self.server_addr) 
-        
-        self.write_console(f"Server started on {self.server_addr[0]}:{self.server_addr[1]}")        
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(self.server_addr)
+
+        self.write_console(f"Server started on {self.server_addr[0]}:{self.server_addr[1]}")
         threading.Thread(target=self.handle_messages, daemon=True).start()
         self.run_server()
-    
-    def handle_messages(self): 
+
+    def handle_messages(self):
         '''
         Handle receiving messages.
         '''
-        while True: 
-            data, addr = self.sock.recvfrom(BUFFER_SIZE) 
-            if addr in self.clients:
+        while True:
+            data, addr = self.sock.recvfrom(BUFFER_SIZE)
+            if addr in self.connections.keys():
                 try:
-                    # Convert message to JSON dictionary after decoding
-                    msg = json.loads(decrypt_with_aes(self.clients[addr], data))
-
-                    if msg['msg_type'] == 'msg':
-                        h = hmac.HMAC(self.client_hmac_keys[addr], hashes.SHA256())
-                        h.update(msg['msg'].encode())
-
-                        # Verify message with HMAC
-                        if h.finalize() == bytes.fromhex(msg['hmac']):
-                            self.write_console(f'[HMAC Verified] [{addr}] {msg["msg"]}')
+                    msg = self._decode_message(addr=addr, data=data)
+                    if msg['msg_type'] == 0:
+                        # Handle CONREQ Message
+                        self.write_console(f'Received CONREQ for existiong client: [{addr}]. Sending CONACK')
+                        self.initialize_client(rsa_key=msg['payload'], addr=addr)
+                        conack = self.create_con_ack_message(addr=addr)
+                        self.sock.sendto(conack,addr)
+                    elif msg['msg_type'] == 1:
+                        # Handle CONACK Message
+                        raise RuntimeError('Server received CONACK message.')
+                    elif msg['msg_type'] == 2:
+                        # Handle Data Message
+                        # Check Validity
+                        validity = self.check_hmac_validation(addr=addr, payload=msg['payload'],received_hmac=msg['hmac'])
+                        if validity:
+                            self.write_console(f'[HMAC Verified] [{addr}] {msg["payload"].decode()}')
                         else:
-                            self.write_console(f'WARNING: HMAC VERIFICATION FAILED FOR: [{addr}]')
-                        
-                        # Send Acknowledgement
-                        ack = {}
-                        ack['msg_type'] = 'ack'
-                        ack['seq'] = msg['seq'] + len(msg['msg'])
-                        encrypted = encrypt_with_aes(self.clients[addr], json.dumps(ack)).encode()
-                        self.sock.sendto(encrypted, addr)
+                            self.write_console(f'[HMAC FAILED] [{addr}] {msg["payload"].decode()}')
 
-                        # Propagate message to all other clients.
-                        self.broadcast_message(msg['msg'], exclude_addr=addr)
-                    elif msg['msg_type'] == 'ack':
-                        self.seq[addr] = msg['seq']
+                        # Send Acknowledgement
+                        ack_msg = self.create_ack_message(addr, msg['payload'])
+                        self.sock.sendto(ack_msg, addr)
+
+                        # Broadcast Message
+                        self.broadcast_message(msg['payload'].decode(), exclude_addr=addr)
+                    elif msg['msg_type'] == 3:
+                        # Handle Acknowledgement Message
+                        self.connections[addr].rx_seq = msg['seq']
+                        self.write_console(f"Ack received {msg['seq']}")
+                    else:
+                        raise RuntimeError('Server received message for unsopported type.')
                 except Exception as e:
                     self.write_console(f'Message malformed from {addr}')
+                    self.write_console(f'{e}')
             else:
-                self.initialize_client(data, addr)
-                
-    def initialize_client(self, data: bytes, addr: tuple):
-        '''
-        Initialize a client.
+                msg = self._decode_message(addr=addr, data=data)
+                self.write_console(f'Received CONREQ for client: [{addr}].')
+                self.initialize_client(addr=addr, rsa_key=msg['payload'])
+                conack = self.create_con_ack_message(addr=addr)
+                self.write_console(f'Sending CONACK to: [{addr}].')
+                self.sock.sendto(conack,addr)
 
-        Params:
-            data: base64 RSA Public key for a client
-            addr: Client address
-        '''
-        try:
-            rsa_pub_key = base64.b64decode(data) 
-            self.clients[addr] = generate_aes_key()
-            self.client_keys[addr] = rsa_pub_key 
-            self.client_hmac_keys[addr] = generate_aes_key() # Set the HMAC secret to 128 random bytes
-            self.seq[addr] = 0
-            
-            self.sock.sendto(encrypt_with_rsa(rsa_pub_key, self.clients[addr]), addr)
-            self.sock.sendto(encrypt_with_aes(self.clients[addr], self.client_hmac_keys[addr].hex()).encode(), addr)
-            self.write_console(f"Key exchanged with {addr}")
-        except Exception as e:
-            self.write_console(f'Initialization failed for {addr}')
-            self.write_console(e)
+                # self.send_msg_with_ack(msg=conack)
+                # self.initialize_client(data, addr)
 
     def broadcast_message(self, msg: str, exclude_addr=None):
         '''
         Broadcast a message to all clients (except the excluded)
-        
+
         Params:
             msg: string message to broadcast
             exclude_addr: client to be excluded
         '''
-        for client_addr, aes_key in self.clients.items():
+        for client_addr in self.connections.keys():
             if client_addr == exclude_addr:
                 continue
-            h = hmac.HMAC(self.client_hmac_keys[client_addr], hashes.SHA256())
-            h.update(msg.encode())
-            finalize = h.finalize()
-            encrypted = encrypt_with_aes(aes_key, msg).encode()
+            data_msg = self.create_data_message(addr=client_addr, payload=msg.encode())
 
-            deliverable = {}
-            deliverable['msg'] = msg
-            deliverable['hmac'] = finalize.hex()
-            deliverable['seq'] = self.seq[client_addr]
-            deliverable['msg_type'] = 'msg'
+            desired_seq = self.connections[client_addr].rx_seq + len(msg.encode())
+            self.write_console(f'Current Seq: {self.connections[client_addr].rx_seq}')
+            self.write_console(f'Desired Seq: {desired_seq}')
 
-            encrypted = encrypt_with_aes(aes_key, json.dumps(deliverable)).encode()
-            desired_seq = self.seq[client_addr] + len(msg)
-            threading.Thread(target=self.send_msg_with_ack, 
-                             args=[encrypted, desired_seq, client_addr, 3], 
+            threading.Thread(target=self.send_msg_with_ack,
+                             args=[data_msg, desired_seq, client_addr, 3],
                              daemon=True).start()
-            
+
     def send_msg_with_ack(self, encrypted_msg: bytes, desired_seq: int, client_addr: tuple, retries=3):
         '''
         Sends a message and waits for acknowledgements
@@ -139,12 +117,12 @@ class Server(CursesConsoleApp, RussChatMessageHandler):
             client_addr: address to send the message
             retries: Number of retries (default: 3)
         '''
-        retries = 0
-        while desired_seq != self.seq[client_addr]:
+        retry_count = 0
+        while self.connections[client_addr].rx_seq != desired_seq:
             self.sock.sendto(encrypted_msg, client_addr)
             time.sleep(0.3)
-            retries += 1
-            if retries >= 3:
+            retry_count += 1
+            if retry_count >= retries:
                 self.write_console(f'NO ACK RECEIVED FROM {client_addr}')
                 break
 
