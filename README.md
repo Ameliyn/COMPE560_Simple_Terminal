@@ -28,6 +28,8 @@ python3 src/client.py
 
 ### Documentation
 
+See the [WIKI](https://github.com/Ameliyn/COMPE560_Simple_Terminal/wiki) for more information!
+
 Look in the `docs` folder for documentation. There is a word document with more explanation, figures (in the `docs/images/` folder) that show the client and server action loops, and ladder charts for multiple event cases. All figures are collected in a powerpoint for ease of inspection as well.
 
 ### Source Files
