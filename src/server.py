@@ -17,6 +17,7 @@ BUFFER_SIZE = 4096
 
 
 class Server(CursesConsoleApp, RussChatMessageHandler):
+    '''A class that handles the server for encrypted communication.'''
     def __init__(self, server_addr):
         '''Initialize the Server.
 
@@ -26,9 +27,11 @@ class Server(CursesConsoleApp, RussChatMessageHandler):
         RussChatMessageHandler.__init__(self)
         CursesConsoleApp.__init__(self, username='Server')
         self.server_addr = server_addr
+        '''Address of the server.'''
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        '''Socket to post packets to.'''
+        
         self.sock.bind(self.server_addr)
-
         self.write_console(f"Server started on {self.server_addr[0]}:{self.server_addr[1]}")
         threading.Thread(target=self.handle_messages, daemon=True).start()
         self.run_server()
@@ -38,53 +41,57 @@ class Server(CursesConsoleApp, RussChatMessageHandler):
         Handle receiving messages.
         '''
         while True:
-            data, addr = self.sock.recvfrom(BUFFER_SIZE)
-            if addr in self.connections.keys():
-                try:
-                    msg = self._decode_message(addr=addr, data=data)
-                    if msg['msg_type'] == 0:
-                        # Handle CONREQ Message
-                        self.write_console(f'Received CONREQ for existiong client: [{addr}]. Sending CONACK')
-                        self.initialize_client(rsa_key=msg['payload'], addr=addr)
-                        conack = self.create_con_ack_message(addr=addr)
-                        self.sock.sendto(conack,addr)
-                    elif msg['msg_type'] == 1:
-                        # Handle CONACK Message
-                        raise RuntimeError('Server received CONACK message.')
-                    elif msg['msg_type'] == 2:
-                        # Handle Data Message
-                        # Check Validity
-                        validity = self.check_hmac_validation(addr=addr, payload=msg['payload'],received_hmac=msg['hmac'])
-                        if validity:
-                            self.write_console(f'[HMAC Verified] [{addr}] {msg["payload"].decode()}')
+            try:
+                data, addr = self.sock.recvfrom(BUFFER_SIZE)
+                if addr in self.connections.keys():
+                    try:
+                        msg = self._decode_message(addr=addr, data=data)
+                        if msg['msg_type'] == 0:
+                            # Handle CONREQ Message
+                            self.write_console(f'Received CONREQ for existiong client: [{addr}]. Sending CONACK')
+                            self.initialize_client(rsa_key=msg['payload'], addr=addr)
+                            conack = self.create_con_ack_message(addr=addr)
+                            self.sock.sendto(conack,addr)
+                        elif msg['msg_type'] == 1:
+                            # Handle CONACK Message
+                            raise RuntimeError('Server received CONACK message.')
+                        elif msg['msg_type'] == 2:
+                            # Handle Data Message
+                            # Check Validity
+                            validity = self.check_hmac_validation(addr=addr, payload=msg['payload'],received_hmac=msg['hmac'])
+                            if validity:
+                                self.write_console(f'[HMAC Verified] [{addr}] {msg["payload"].decode()}')
+                            else:
+                                self.write_console(f'[HMAC FAILED] [{addr}] {msg["payload"].decode()}')
+
+                            # Send Acknowledgement
+                            ack_msg = self.create_ack_message(addr, msg['payload'])
+                            self.sock.sendto(ack_msg, addr)
+
+                            # Broadcast Message
+                            self.broadcast_message(msg['payload'].decode(), exclude_addr=addr)
+                        elif msg['msg_type'] == 3:
+                            # Handle Acknowledgement Message
+                            self.connections[addr].rx_seq = msg['seq']
+                            # self.write_console(f"Ack received {msg['seq']}")
                         else:
-                            self.write_console(f'[HMAC FAILED] [{addr}] {msg["payload"].decode()}')
-
-                        # Send Acknowledgement
-                        ack_msg = self.create_ack_message(addr, msg['payload'])
-                        self.sock.sendto(ack_msg, addr)
-
-                        # Broadcast Message
-                        self.broadcast_message(msg['payload'].decode(), exclude_addr=addr)
-                    elif msg['msg_type'] == 3:
-                        # Handle Acknowledgement Message
-                        self.connections[addr].rx_seq = msg['seq']
-                        self.write_console(f"Ack received {msg['seq']}")
-                    else:
-                        raise RuntimeError('Server received message for unsopported type.')
-                except Exception as e:
-                    self.write_console(f'Message malformed from {addr}')
-                    self.write_console(f'{e}')
-            else:
-                msg = self._decode_message(addr=addr, data=data)
-                self.write_console(f'Received CONREQ for client: [{addr}].')
-                self.initialize_client(addr=addr, rsa_key=msg['payload'])
-                conack = self.create_con_ack_message(addr=addr)
-                self.write_console(f'Sending CONACK to: [{addr}].')
-                self.sock.sendto(conack,addr)
-
-                # self.send_msg_with_ack(msg=conack)
-                # self.initialize_client(data, addr)
+                            raise RuntimeError('Server received message for unsopported type.')
+                    except Exception as e:
+                        self.write_console(f'Message malformed from {addr}')
+                        self.write_console(f'{e}')
+                else:
+                    # Initialize new client!
+                    msg = self._decode_message(addr=addr, data=data)
+                    self.write_console(f'Received CONREQ for client: [{addr}].')
+                    self.initialize_client(addr=addr, rsa_key=msg['payload'])
+                    conack = self.create_con_ack_message(addr=addr)
+                    self.write_console(f'Sending CONACK to: [{addr}].')
+                    self.sock.sendto(conack,addr)
+            except Exception as e:
+                self.write_console(f'Bad message from [{addr}], resetting client')
+                reset_msg = self.create_reset_message(addr=addr)
+                self.sock.sendto(reset_msg, addr)
+                
 
     def broadcast_message(self, msg: str, exclude_addr=None):
         '''
@@ -100,8 +107,8 @@ class Server(CursesConsoleApp, RussChatMessageHandler):
             data_msg = self.create_data_message(addr=client_addr, payload=msg.encode())
 
             desired_seq = self.connections[client_addr].rx_seq + len(msg.encode())
-            self.write_console(f'Current Seq: {self.connections[client_addr].rx_seq}')
-            self.write_console(f'Desired Seq: {desired_seq}')
+            # self.write_console(f'Current Seq: {self.connections[client_addr].rx_seq}')
+            # self.write_console(f'Desired Seq: {desired_seq}')
 
             threading.Thread(target=self.send_msg_with_ack,
                              args=[data_msg, desired_seq, client_addr, 3],

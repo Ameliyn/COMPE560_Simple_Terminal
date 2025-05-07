@@ -15,13 +15,18 @@ SERVER_PORT = 12347
 BUFFER_SIZE = 4096
 
 class Client(CursesConsoleApp, RussChatMessageHandler):
-
+    '''A class that handles a client for encrypted chatroom communication.'''
     def __init__(self, username, server_addr):
+        self.connection_established = False
         RussChatMessageHandler.__init__(self)
         CursesConsoleApp.__init__(self, username=username)
         self.username = username
+        '''Current client's username'''
         self.server_addr = server_addr
+        '''Server address'''
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        '''Socket to post UDP packets to'''
+        
         self.initialize()
         threading.Thread(target=self.receive_messages, daemon=True).start()
         self.run_client()
@@ -29,7 +34,7 @@ class Client(CursesConsoleApp, RussChatMessageHandler):
     def initialize(self):
         '''Initialize Client.'''
         self.write_console('Establishing Secure Server Connection...')
-        thread_started = False
+        initial_response_thread_started = False
         timeout = 0
         self.create_connection(self.server_addr, 0)
         conreq = self.create_con_req_message(self.server_addr)
@@ -37,9 +42,9 @@ class Client(CursesConsoleApp, RussChatMessageHandler):
 
         while self.connections[self.server_addr].aes_key is None or self.connections[self.server_addr].hmac_secret is None:
             self.write_console('Waiting for server Connection...')
-            if not thread_started:
+            if not initial_response_thread_started:
                 threading.Thread(target=self.wait_for_initial_response, daemon=True).start()
-                thread_started = True
+                initial_response_thread_started = True
             time.sleep(0.3)
             timeout += 0.3
             if timeout > 10:
@@ -48,6 +53,7 @@ class Client(CursesConsoleApp, RussChatMessageHandler):
                 raise RuntimeError('Connection Could Not be Established with Server')
 
         self.write_console('Done!')
+        self.connection_established = True
 
     def wait_for_initial_response(self):
         '''Wait for initial response asynchronously.'''
@@ -60,8 +66,8 @@ class Client(CursesConsoleApp, RussChatMessageHandler):
             else:
                 self.handle_con_ack_message(message_dict=msg, addr=addr)
                 self.server_addr = addr
-                self.write_console("Received and decrypted AES key.")
-                self.write_console(f'Received HMAC key')
+                # self.write_console("Received and decrypted AES key.")
+                # self.write_console(f'Received HMAC key')
                 break
 
     # Function to receive messages concurrently
@@ -84,7 +90,7 @@ class Client(CursesConsoleApp, RussChatMessageHandler):
                         # Check Validity
                         validity = self.check_hmac_validation(addr=addr, payload=msg['payload'],received_hmac=msg['hmac'])
                         if validity:
-                            self.write_console(f'[HMAC Verified] [{addr}] {msg["payload"].decode()}')
+                            self.write_console(f'[HMAC Verified] {msg["payload"].decode()}')
                         else:
                             self.write_console(f'[HMAC FAILED] [{addr}] {msg["payload"].decode()}')
 
@@ -93,9 +99,15 @@ class Client(CursesConsoleApp, RussChatMessageHandler):
                         self.sock.sendto(ack_msg, addr)
 
                     elif msg['msg_type'] == 3:
-                        self.write_console(f'Ack Received for seq: {msg["seq"]}')
+                        # self.write_console(f'Ack Received for seq: {msg["seq"]}')
                         self.connections[addr].rx_seq = msg['seq']
                         # Handle Acknowledgement Message
+                    elif msg['msg_type'] == 4:
+                        # Handle Connection Reset message
+                        self.write_console('Restarting Server Connection...')
+                        self.connection_established = False
+                        RussChatMessageHandler.__init__(self,self.connections)
+                        self.initialize()
                     else:
                         raise RuntimeError('Server received message for unsopported type.')
                 except Exception as e:
@@ -113,12 +125,10 @@ class Client(CursesConsoleApp, RussChatMessageHandler):
                     data_message = self.create_data_message(addr=self.server_addr, payload=f'{self.username}: {message}'.encode())
 
                     desired_seq = self.connections[self.server_addr].rx_seq + len(f'{self.username}: {message}'.encode())
-                    self.write_console(f'Current Seq: {self.connections[self.server_addr].rx_seq}')
-                    self.write_console(f'Desired Seq: {desired_seq}')
 
                     retries = 3
                     retry_count = 0
-                    while self.connections[self.server_addr].rx_seq != desired_seq:
+                    while self.connections[self.server_addr].rx_seq != desired_seq or not self.connection_established:
                         self.sock.sendto(data_message, self.server_addr)
                         time.sleep(0.3)
                         retry_count += 1

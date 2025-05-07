@@ -7,6 +7,7 @@ from cryptography.hazmat.primitives import hashes, hmac
 
 
 class RussChatMessageHandler():
+    '''A class that handles the custom protocol information for encrypted packets.'''
     class Connection():
         '''A storage class that contains keys, secrets, and sequences for a given connection.'''
         def __init__(self,
@@ -204,7 +205,17 @@ class RussChatMessageHandler():
                                tx_seq=0,
                                aes_key=self.aes_key,
                                hmac_secret=self.hmac_secret)
-
+    
+    def create_reset_message(self, addr):
+        '''Create a connection reset message for a given address.
+        
+        Params:
+            addr: Target address
+        '''
+        if addr in self.connections:
+            self.connections.pop(addr)
+        return self._create_message(addr=addr, msg_type=4)
+    
     def create_data_message(self, addr, payload: bytes):
         '''Create a standard data message with the given flags (default AES encrypted)
 
@@ -314,7 +325,10 @@ class RussChatMessageHandler():
         elif result['flags'][-3] == '1':
             if self.connections[addr].aes_key is None:
                 raise RuntimeError('Message Encrypted but AES key not present. Message decryption failed.')
-            result['payload'] = decrypt_bytes_with_aes(self.connections[addr].aes_key, bytes(data[38:38+result['size']]))
+            try:
+                result['payload'] = decrypt_bytes_with_aes(self.connections[addr].aes_key, bytes(data[38:38+result['size']]))
+            except KeyError as k:
+                result['payload'] = None
         else:
             raise RuntimeError(f'Encryption flags not set properly. {result["flags"]}')
         return result

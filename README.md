@@ -4,9 +4,20 @@ Prepared by Skye Russ
 
 ## Instructions
 
-1. run `python server.py`
-2. run `python client.py`
-3. Have fun!
+### Running on Host:
+
+Install the requirements and then have fun!
+```bash
+pip install -r requirements.txt
+python3 src/server.py
+python3 src/client.py
+```
+
+### Running with Docker:
+
+1. Install docker
+2. Navigate to the `COMPE560_simple_terminal` folder
+3. Run either `docker_start.bat` (windows) or `docker_start.sh` (unix)
 
 ## Implementation
 
